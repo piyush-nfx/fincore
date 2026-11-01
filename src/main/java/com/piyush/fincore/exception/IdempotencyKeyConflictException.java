@@ -5,6 +5,10 @@ import org.springframework.http.HttpStatus;
 public class IdempotencyKeyConflictException extends BusinessException {
 
     public IdempotencyKeyConflictException() {
-        super(HttpStatus.CONFLICT, "This Idempotency-Key has already been used; generate a new one for a new transfer");
+        this("This Idempotency-Key has already been used; generate a new one for a new transfer");
+    }
+
+    public IdempotencyKeyConflictException(String message) {
+        super(HttpStatus.CONFLICT, message);
     }
 }

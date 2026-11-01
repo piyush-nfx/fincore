@@ -2,11 +2,14 @@ package com.piyush.fincore.service;
 
 import com.piyush.fincore.dto.TransactionResponse;
 import com.piyush.fincore.dto.TransferRequest;
+import com.piyush.fincore.dto.TransferResult;
 import com.piyush.fincore.entity.Transaction;
+import com.piyush.fincore.entity.TransactionStatus;
 import com.piyush.fincore.entity.Wallet;
 import com.piyush.fincore.exception.IdempotencyKeyConflictException;
 import com.piyush.fincore.exception.InsufficientBalanceException;
 import com.piyush.fincore.exception.InvalidOperationException;
+import com.piyush.fincore.exception.TransferFailedException;
 import com.piyush.fincore.exception.WalletNotFoundException;
 import com.piyush.fincore.repository.TransactionRepository;
 import com.piyush.fincore.repository.WalletRepository;
@@ -31,22 +34,16 @@ public class TransferService {
      *
      * <p>Concurrency: both wallets carry @Version. If another transfer updates one of them between our read and
      * our commit, the version check fails and the commit throws ObjectOptimisticLockingFailureException instead
-     * of double-spending. Phase 3 adds automatic retries for that case.
+     * of double-spending. TransferFacade catches that and runs this method again in a fresh transaction.
      *
      * @param userId the logged-in user; they must own the source wallet (the destination can be anyone's)
      */
     @Transactional
-    public TransactionResponse transfer(Long userId, TransferRequest request, String idempotencyKey) {
-        // A retried request with a key we've already processed returns the original result: no second transfer.
-        if (idempotencyKey != null) {
-            Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
-            if (existing.isPresent()) {
-                // Never hand back another user's transaction just because they guessed or reused a key.
-                if (!existing.get().getFromWallet().getUser().getId().equals(userId)) {
-                    throw new IdempotencyKeyConflictException();
-                }
-                return TransactionResponse.from(existing.get());
-            }
+    public TransferResult transfer(Long userId, TransferRequest request, String idempotencyKey) {
+        // A retried request with a key we've already processed gets the original outcome: no second transfer.
+        Optional<TransferResult> replay = replay(userId, request, idempotencyKey);
+        if (replay.isPresent()) {
+            return replay.get();
         }
 
         if (request.fromWalletId().equals(request.toWalletId())) {
@@ -68,8 +65,53 @@ public class TransferService {
             throw e; // unchecked exception -> this transaction rolls back
         }
         to.credit(request.amount());
+        // Send the wallet UPDATEs now, before the ledger INSERT. Hibernate would otherwise run the INSERT first, which
+        // takes shared locks on both wallet rows (foreign keys); two transfers holding those and both wanting the
+        // exclusive lock for the UPDATE is a deadlock. Updating first means a concurrent transfer simply waits, then
+        // fails the version check cleanly and is retried.
+        walletRepository.flush();
 
         Transaction tx = transactionRepository.save(Transaction.transfer(from, to, request.amount(), idempotencyKey));
-        return TransactionResponse.from(tx);
+        return new TransferResult(TransactionResponse.from(tx), false);
+    }
+
+    /**
+     * Used by TransferFacade after two requests with the same new key raced and the database's UNIQUE constraint
+     * rejected the loser: by now the winner's row is committed, so the loser can answer with it.
+     */
+    @Transactional(readOnly = true)
+    public Optional<TransferResult> findReplay(Long userId, TransferRequest request, String idempotencyKey) {
+        return replay(userId, request, idempotencyKey);
+    }
+
+    /**
+     * Looks up an earlier transfer with this key and answers exactly as the first request was answered:
+     * SUCCESS -> the same transaction again; FAILED -> the same 422 error again.
+     */
+    private Optional<TransferResult> replay(Long userId, TransferRequest request, String idempotencyKey) {
+        Optional<Transaction> found = transactionRepository.findByIdempotencyKey(idempotencyKey);
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        Transaction existing = found.get();
+        // Never hand back another user's transaction just because they guessed or reused a key.
+        if (!existing.getFromWallet().getUser().getId().equals(userId)) {
+            throw new IdempotencyKeyConflictException();
+        }
+        // Same key but a different request is a client bug; silently returning the old transfer would hide it.
+        if (!isSameRequest(existing, request)) {
+            throw new IdempotencyKeyConflictException(
+                    "This Idempotency-Key was already used for a different transfer (wallets or amount differ)");
+        }
+        if (existing.getStatus() == TransactionStatus.FAILED) {
+            throw new TransferFailedException(existing.getFailureReason());
+        }
+        return Optional.of(new TransferResult(TransactionResponse.from(existing), true));
+    }
+
+    private static boolean isSameRequest(Transaction existing, TransferRequest request) {
+        return existing.getFromWallet().getId().equals(request.fromWalletId())
+                && existing.getToWallet().getId().equals(request.toWalletId())
+                && existing.getAmount().compareTo(request.amount()) == 0;
     }
 }

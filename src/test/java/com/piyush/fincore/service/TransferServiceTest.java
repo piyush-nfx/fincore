@@ -1,11 +1,12 @@
 package com.piyush.fincore.service;
 
-import com.piyush.fincore.dto.TransactionResponse;
 import com.piyush.fincore.dto.TransferRequest;
+import com.piyush.fincore.dto.TransferResult;
 import com.piyush.fincore.entity.*;
 import com.piyush.fincore.exception.IdempotencyKeyConflictException;
 import com.piyush.fincore.exception.InsufficientBalanceException;
 import com.piyush.fincore.exception.InvalidOperationException;
+import com.piyush.fincore.exception.TransferFailedException;
 import com.piyush.fincore.exception.WalletNotFoundException;
 import com.piyush.fincore.repository.TransactionRepository;
 import com.piyush.fincore.repository.WalletRepository;
@@ -57,13 +58,14 @@ class TransferServiceTest {
         stubWallets(aliceWallet, bobWallet);
         when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        TransactionResponse result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30")), "key-1");
+        TransferResult result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30")), "key-1");
 
         assertThat(aliceWallet.getBalance()).isEqualByComparingTo("70");
         assertThat(bobWallet.getBalance()).isEqualByComparingTo("30");
-        assertThat(result.status()).isEqualTo(TransactionStatus.SUCCESS);
-        assertThat(result.type()).isEqualTo(TransactionType.TRANSFER);
-        assertThat(result.idempotencyKey()).isEqualTo("key-1");
+        assertThat(result.replayed()).isFalse();
+        assertThat(result.transaction().status()).isEqualTo(TransactionStatus.SUCCESS);
+        assertThat(result.transaction().type()).isEqualTo(TransactionType.TRANSFER);
+        assertThat(result.transaction().idempotencyKey()).isEqualTo("key-1");
         verifyNoInteractions(failedTransferRecorder);
     }
 
@@ -72,7 +74,7 @@ class TransferServiceTest {
         // Bob asks to send money out of Alice's wallet: the owner-scoped lookup finds nothing.
         when(walletRepository.findByIdAndUserId(1L, BOB)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> transferService.transfer(BOB, new TransferRequest(1L, 2L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(BOB, new TransferRequest(1L, 2L, BigDecimal.TEN), "key-x"))
                 .isInstanceOf(WalletNotFoundException.class);
 
         assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
@@ -94,7 +96,7 @@ class TransferServiceTest {
 
     @Test
     void sameWalletTransferIsRejectedBeforeTouchingTheDatabase() {
-        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 1L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 1L, BigDecimal.TEN), "key-s"))
                 .isInstanceOf(InvalidOperationException.class);
 
         verifyNoInteractions(walletRepository);
@@ -105,7 +107,7 @@ class TransferServiceTest {
         when(walletRepository.findByIdAndUserId(1L, ALICE)).thenReturn(Optional.of(aliceWallet));
         when(walletRepository.findById(99L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 99L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 99L, BigDecimal.TEN), "key-u"))
                 .isInstanceOf(WalletNotFoundException.class);
         assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
     }
@@ -115,7 +117,7 @@ class TransferServiceTest {
         Wallet usd = wallet(3L, BOB, "USD", "0");
         stubWallets(aliceWallet, usd);
 
-        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 3L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 3L, BigDecimal.TEN), "key-c"))
                 .isInstanceOf(InvalidOperationException.class)
                 .hasMessageContaining("Currency mismatch");
         assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
@@ -126,12 +128,36 @@ class TransferServiceTest {
         Transaction original = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-3");
         when(transactionRepository.findByIdempotencyKey("key-3")).thenReturn(Optional.of(original));
 
-        TransactionResponse result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30")), "key-3");
+        TransferResult result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30.00")), "key-3");
 
-        assertThat(result.idempotencyKey()).isEqualTo("key-3");
+        assertThat(result.replayed()).isTrue();
+        assertThat(result.transaction().idempotencyKey()).isEqualTo("key-3");
         assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
         verifyNoInteractions(walletRepository);
         verify(transactionRepository, never()).save(any());
+    }
+
+    @Test
+    void replayOfAFailedTransferGivesTheSameErrorAgain() {
+        Transaction failed = Transaction.failedTransfer(aliceWallet, bobWallet, new BigDecimal("500"), "key-f",
+                "Insufficient balance in wallet 1");
+        when(transactionRepository.findByIdempotencyKey("key-f")).thenReturn(Optional.of(failed));
+
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("500")), "key-f"))
+                .isInstanceOf(TransferFailedException.class)
+                .hasMessage("Insufficient balance in wallet 1");
+        verifyNoInteractions(walletRepository, failedTransferRecorder);
+    }
+
+    @Test
+    void sameKeyWithADifferentAmountIsRejected() {
+        Transaction original = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-d");
+        when(transactionRepository.findByIdempotencyKey("key-d")).thenReturn(Optional.of(original));
+
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("31")), "key-d"))
+                .isInstanceOf(IdempotencyKeyConflictException.class)
+                .hasMessageContaining("different transfer");
+        verifyNoInteractions(walletRepository);
     }
 
     @Test

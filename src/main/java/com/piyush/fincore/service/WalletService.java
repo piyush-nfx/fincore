@@ -46,9 +46,12 @@ public class WalletService {
     public WalletResponse deposit(Long userId, Long walletId, DepositRequest request) {
         Wallet wallet = findOwnedWallet(userId, walletId);
         wallet.credit(request.amount());
+        // No save(wallet) needed: it is a managed entity, so Hibernate writes the change itself (dirty checking).
+        // flush() just makes that UPDATE happen before the ledger INSERT, to avoid the lock-order deadlock
+        // explained in TransferService.
+        walletRepository.flush();
         // The balance change and its ledger row commit together, or neither does.
         transactionRepository.save(Transaction.deposit(wallet, request.amount()));
-        // No explicit save(wallet): it is a managed entity, so Hibernate flushes the change at commit (dirty checking).
         return WalletResponse.from(wallet);
     }
 

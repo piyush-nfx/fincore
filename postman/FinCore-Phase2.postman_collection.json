@@ -209,7 +209,8 @@
             "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" },
-              { "key": "Authorization", "value": "Bearer {{bobAccess}}" }
+              { "key": "Authorization", "value": "Bearer {{bobAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
             ],
             "url": "{{baseUrl}}/api/transfers",
             "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 500\n}" }

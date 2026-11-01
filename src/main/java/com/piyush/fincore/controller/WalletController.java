@@ -4,7 +4,9 @@ import com.piyush.fincore.dto.CreateWalletRequest;
 import com.piyush.fincore.dto.DepositRequest;
 import com.piyush.fincore.dto.WalletResponse;
 import com.piyush.fincore.security.AuthenticatedUser;
+import com.piyush.fincore.service.ConcurrencyRetry;
 import com.piyush.fincore.service.WalletService;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -16,12 +18,14 @@ import java.net.URI;
 import java.util.List;
 
 // @AuthenticationPrincipal hands us the user the JWT filter put into the SecurityContext.
+@Tag(name = "Wallets", description = "Your wallets: create, list, view, deposit")
 @RestController
 @RequestMapping("/api/wallets")
 @RequiredArgsConstructor
 public class WalletController {
 
     private final WalletService walletService;
+    private final ConcurrencyRetry concurrencyRetry;
 
     @PostMapping
     public ResponseEntity<WalletResponse> create(@AuthenticationPrincipal AuthenticatedUser user,
@@ -42,9 +46,10 @@ public class WalletController {
         return walletService.get(user.id(), id);
     }
 
+    // Retried from out here (not inside the service) so each attempt runs in a fresh transaction.
     @PostMapping("/{id}/deposit")
     public WalletResponse deposit(@AuthenticationPrincipal AuthenticatedUser user, @PathVariable Long id,
                                   @Valid @RequestBody DepositRequest request) {
-        return walletService.deposit(user.id(), id, request);
+        return concurrencyRetry.execute(() -> walletService.deposit(user.id(), id, request));
     }
 }

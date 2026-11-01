@@ -34,3 +34,6 @@ build/
 
 ### Local secrets ###
 .env
+
+### Local study notes (not part of the repo) ###
+docs/

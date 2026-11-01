@@ -1,0 +1,333 @@
+{
+  "info": {
+    "name": "FinCore - Phase 3 (Idempotency, history, docs)",
+    "description": "Run top to bottom with the Collection Runner. It sets up its own users and wallets. The concurrency (retry) test needs parallel requests, which Postman's runner can't do; see the explainer or run it from Swagger/JMeter.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8083" }
+  ],
+  "item": [
+    {
+      "name": "1. Setup",
+      "item": [
+        {
+          "name": "1.1 Register Alice",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('aliceEmail', 'alice+' + Date.now() + '@example.com');"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Alice\",\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"alice-pass-123\"\n}" }
+          }
+        },
+        {
+          "name": "1.2 Register Bob",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('bobEmail', 'bob+' + Date.now() + '@example.com');"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Bob\",\n  \"email\": \"{{bobEmail}}\",\n  \"password\": \"bob-pass-1234\"\n}" }
+          }
+        },
+        {
+          "name": "1.3 Login Alice",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('aliceAccess', pm.response.json().accessToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"alice-pass-123\"\n}" }
+          }
+        },
+        {
+          "name": "1.4 Login Bob",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('bobAccess', pm.response.json().accessToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{bobEmail}}\",\n  \"password\": \"bob-pass-1234\"\n}" }
+          }
+        },
+        {
+          "name": "1.5 Alice creates a wallet",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('aliceWalletId', pm.response.json().id);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets",
+            "body": { "mode": "raw", "raw": "{\n  \"currency\": \"INR\"\n}" }
+          }
+        },
+        {
+          "name": "1.6 Bob creates a wallet",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('bobWalletId', pm.response.json().id);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{bobAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets",
+            "body": { "mode": "raw", "raw": "{\n  \"currency\": \"INR\"\n}" }
+          }
+        },
+        {
+          "name": "1.7 Alice deposits 1000",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}/deposit",
+            "body": { "mode": "raw", "raw": "{\n  \"amount\": 1000\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Idempotency",
+      "item": [
+        {
+          "name": "2.1 Transfer without Idempotency-Key -> 400",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));",
+            "pm.test('Names the missing header', () => pm.expect(pm.response.json().message).to.include('Idempotency-Key'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 50\n}" }
+          }
+        },
+        {
+          "name": "2.2 Transfer 100 with a new key",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('payKey', pm.variables.replaceIn('{{$guid}}'));"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.test('Not a replay', () => pm.expect(pm.response.headers.get('Idempotent-Replayed')).to.eql('false'));",
+              "pm.collectionVariables.set('payTxId', pm.response.json().id);"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{payKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 100\n}" }
+          }
+        },
+        {
+          "name": "2.3 Retry with the same key -> same result, flagged as replay",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201, same as the original', () => pm.response.to.have.status(201));",
+            "pm.test('Same transaction id', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('payTxId')));",
+            "pm.test('Replay header is true', () => pm.expect(pm.response.headers.get('Idempotent-Replayed')).to.eql('true'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{payKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 100\n}" }
+          }
+        },
+        {
+          "name": "2.4 Same key, different amount -> 409",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('409', () => pm.response.to.have.status(409));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{payKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 999\n}" }
+          }
+        },
+        {
+          "name": "2.5 Alice was charged once (balance 900)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Balance 900', () => pm.expect(Number(pm.response.json().balance)).to.eql(900));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{aliceAccess}}" }],
+            "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}"
+          }
+        },
+        {
+          "name": "2.6 Too-large transfer -> 422",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('failKey', pm.variables.replaceIn('{{$guid}}'));"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('422', () => pm.response.to.have.status(422));",
+              "pm.collectionVariables.set('failMessage', pm.response.json().message);"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{failKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 50000\n}" }
+          }
+        },
+        {
+          "name": "2.7 Retry the failed one -> the same 422 again",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('422 again', () => pm.response.to.have.status(422));",
+            "pm.test('Same message as the first attempt', () => pm.expect(pm.response.json().message).to.eql(pm.collectionVariables.get('failMessage')));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{failKey}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 50000\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Transaction history",
+      "item": [
+        {
+          "name": "3.1 Alice's history: newest first, includes the deposit",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const body = pm.response.json();",
+            "pm.test('3 rows: deposit, success, failed', () => pm.expect(body.totalElements).to.eql(3));",
+            "pm.test('Has a DEPOSIT', () => pm.expect(body.content.map(t => t.type)).to.include('DEPOSIT'));",
+            "pm.test('Newest first', () => { const d = body.content.map(t => t.createdAt); pm.expect([...d].sort().reverse()).to.eql(d); });"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{aliceAccess}}" }],
+            "url": "{{baseUrl}}/api/transactions"
+          }
+        },
+        {
+          "name": "3.2 Paging: size=2",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const body = pm.response.json();",
+            "pm.test('2 rows on this page', () => pm.expect(body.content.length).to.eql(2));",
+            "pm.test('2 pages in total', () => pm.expect(body.totalPages).to.eql(2));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{aliceAccess}}" }],
+            "url": "{{baseUrl}}/api/transactions?page=0&size=2"
+          }
+        },
+        {
+          "name": "3.3 Bob's history: only the transfer he received",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "const body = pm.response.json();",
+            "pm.test('1 row', () => pm.expect(body.totalElements).to.eql(1));",
+            "pm.test('The 100 from Alice', () => pm.expect(Number(body.content[0].amount)).to.eql(100));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bobAccess}}" }],
+            "url": "{{baseUrl}}/api/transactions"
+          }
+        },
+        {
+          "name": "3.4 Bob filters by Alice's wallet -> 404",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bobAccess}}" }],
+            "url": "{{baseUrl}}/api/transactions?walletId={{aliceWalletId}}"
+          }
+        },
+        {
+          "name": "3.5 Sort by a hidden field -> 400",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('400', () => pm.response.to.have.status(400));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{aliceAccess}}" }],
+            "url": "{{baseUrl}}/api/transactions?sort=fromWallet.user.passwordHash"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. API docs",
+      "item": [
+        {
+          "name": "4.1 OpenAPI spec is public",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Documents the transfer endpoint', () => pm.expect(pm.response.json().paths).to.have.property('/api/transfers'));"
+          ]}}],
+          "request": { "method": "GET", "url": "{{baseUrl}}/v3/api-docs" }
+        }
+      ]
+    }
+  ]
+}
