@@ -1,0 +1,166 @@
+{
+  "info": {
+    "name": "FinCore - Phase 1 (Core API)",
+    "description": "Run top to bottom (Collection Runner works). Each request saves the ids the next ones need.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8083" }
+  ],
+  "item": [
+    {
+      "name": "1. Register Alice",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201 Created', () => pm.response.to.have.status(201));",
+        "pm.collectionVariables.set('aliceId', pm.response.json().id);"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/auth/register",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Alice\",\n  \"email\": \"alice+{{$timestamp}}@example.com\",\n  \"password\": \"alice-pass-123\"\n}" }
+      }
+    },
+    {
+      "name": "2. Register Bob",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201 Created', () => pm.response.to.have.status(201));",
+        "pm.collectionVariables.set('bobId', pm.response.json().id);"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/auth/register",
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Bob\",\n  \"email\": \"bob+{{$timestamp}}@example.com\",\n  \"password\": \"bob-pass-1234\"\n}" }
+      }
+    },
+    {
+      "name": "3. Create Alice wallet (INR)",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201 Created', () => pm.response.to.have.status(201));",
+        "pm.test('Starts at zero', () => pm.expect(pm.response.json().balance).to.eql(0));",
+        "pm.collectionVariables.set('aliceWalletId', pm.response.json().id);"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/wallets",
+        "body": { "mode": "raw", "raw": "{\n  \"userId\": {{aliceId}},\n  \"currency\": \"INR\"\n}" }
+      }
+    },
+    {
+      "name": "4. Create Bob wallet (INR)",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('201 Created', () => pm.response.to.have.status(201));",
+        "pm.collectionVariables.set('bobWalletId', pm.response.json().id);"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/wallets",
+        "body": { "mode": "raw", "raw": "{\n  \"userId\": {{bobId}},\n  \"currency\": \"INR\"\n}" }
+      }
+    },
+    {
+      "name": "5. Deposit 1000 into Alice",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('200 OK', () => pm.response.to.have.status(200));",
+        "pm.test('Balance is 1000', () => pm.expect(Number(pm.response.json().balance)).to.eql(1000));"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}/deposit",
+        "body": { "mode": "raw", "raw": "{\n  \"amount\": 1000.00\n}" }
+      }
+    },
+    {
+      "name": "6. Transfer 250.50 Alice -> Bob",
+      "event": [
+        { "listen": "prerequest", "script": { "exec": [
+          "pm.collectionVariables.set('transferKey', pm.variables.replaceIn('{{$guid}}'));"
+        ]}},
+        { "listen": "test", "script": { "exec": [
+          "pm.test('201 Created', () => pm.response.to.have.status(201));",
+          "pm.test('SUCCESS', () => pm.expect(pm.response.json().status).to.eql('SUCCESS'));",
+          "pm.collectionVariables.set('transferId', pm.response.json().id);"
+        ]}}
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{transferKey}}" }
+        ],
+        "url": "{{baseUrl}}/api/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 250.50\n}" }
+      }
+    },
+    {
+      "name": "7. Replay same Idempotency-Key (no double send)",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Same transaction returned', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('transferId')));"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{transferKey}}" }
+        ],
+        "url": "{{baseUrl}}/api/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 250.50\n}" }
+      }
+    },
+    {
+      "name": "8. Check balances (Alice 749.50)",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('Alice debited exactly once', () => pm.expect(Number(pm.response.json().balance)).to.eql(749.5));"
+      ]}}],
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}" }
+    },
+    {
+      "name": "9. Insufficient balance -> 422",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('422', () => pm.response.to.have.status(422));"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 999999\n}" }
+      }
+    },
+    {
+      "name": "10. Same wallet -> 400",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('400', () => pm.response.to.have.status(400));"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{aliceWalletId}},\n  \"amount\": 10\n}" }
+      }
+    },
+    {
+      "name": "11. Negative amount -> 400 with fieldErrors",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('400', () => pm.response.to.have.status(400));",
+        "pm.test('amount field reported', () => pm.expect(pm.response.json().fieldErrors).to.have.property('amount'));"
+      ]}}],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/transfers",
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": -50\n}" }
+      }
+    },
+    {
+      "name": "12. Unknown wallet -> 404",
+      "event": [{ "listen": "test", "script": { "exec": [
+        "pm.test('404', () => pm.response.to.have.status(404));"
+      ]}}],
+      "request": { "method": "GET", "url": "{{baseUrl}}/api/wallets/999999" }
+    }
+  ]
+}
