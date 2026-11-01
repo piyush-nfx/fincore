@@ -15,6 +15,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
+
 @Service
 @RequiredArgsConstructor
 public class WalletService {
@@ -24,20 +26,25 @@ public class WalletService {
     private final TransactionRepository transactionRepository;
 
     @Transactional
-    public WalletResponse create(CreateWalletRequest request) {
-        User owner = userRepository.findById(request.userId())
-                .orElseThrow(() -> new UserNotFoundException(request.userId()));
+    public WalletResponse create(Long userId, CreateWalletRequest request) {
+        // The token proved who you are 15 minutes ago; the account could have been deleted since.
+        User owner = userRepository.findById(userId).orElseThrow(() -> new UserNotFoundException(userId));
         return WalletResponse.from(walletRepository.save(new Wallet(owner, request.currency())));
     }
 
     @Transactional(readOnly = true)
-    public WalletResponse get(Long walletId) {
-        return WalletResponse.from(findWallet(walletId));
+    public List<WalletResponse> listMine(Long userId) {
+        return walletRepository.findByUserIdOrderByIdAsc(userId).stream().map(WalletResponse::from).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public WalletResponse get(Long userId, Long walletId) {
+        return WalletResponse.from(findOwnedWallet(userId, walletId));
     }
 
     @Transactional
-    public WalletResponse deposit(Long walletId, DepositRequest request) {
-        Wallet wallet = findWallet(walletId);
+    public WalletResponse deposit(Long userId, Long walletId, DepositRequest request) {
+        Wallet wallet = findOwnedWallet(userId, walletId);
         wallet.credit(request.amount());
         // The balance change and its ledger row commit together, or neither does.
         transactionRepository.save(Transaction.deposit(wallet, request.amount()));
@@ -45,7 +52,12 @@ public class WalletService {
         return WalletResponse.from(wallet);
     }
 
-    private Wallet findWallet(Long walletId) {
-        return walletRepository.findById(walletId).orElseThrow(() -> new WalletNotFoundException(walletId));
+    /**
+     * IDOR protection: a wallet that exists but belongs to someone else gives the same 404 as one that doesn't
+     * exist. A 403 would confirm to an attacker that the id is real.
+     */
+    private Wallet findOwnedWallet(Long userId, Long walletId) {
+        return walletRepository.findByIdAndUserId(walletId, userId)
+                .orElseThrow(() -> new WalletNotFoundException(walletId));
     }
 }

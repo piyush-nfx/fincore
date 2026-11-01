@@ -1,0 +1,374 @@
+{
+  "info": {
+    "name": "FinCore - Phase 2 (Security)",
+    "description": "Run top to bottom with the Collection Runner. Requests save tokens and ids for the next ones. For the last folder, set adminEmail and adminPassword (Current value) in the collection's Variables tab first - they are in your .env as ADMIN_EMAIL / ADMIN_PASSWORD.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8083" },
+    { "key": "adminEmail", "value": "" },
+    { "key": "adminPassword", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Accounts and login",
+      "item": [
+        {
+          "name": "1.1 Register Alice",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('aliceEmail', 'alice+' + Date.now() + '@example.com');"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.test('Role is USER', () => pm.expect(pm.response.json().role).to.eql('USER'));",
+              "pm.test('No password hash in response', () => pm.expect(pm.response.json()).to.not.have.property('passwordHash'));"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Alice\",\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"alice-pass-123\"\n}" }
+          }
+        },
+        {
+          "name": "1.2 Register Bob",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "pm.collectionVariables.set('bobEmail', 'bob+' + Date.now() + '@example.com');"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/register",
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Bob\",\n  \"email\": \"{{bobEmail}}\",\n  \"password\": \"bob-pass-1234\"\n}" }
+          }
+        },
+        {
+          "name": "1.3 Login Alice",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const body = pm.response.json();",
+            "pm.test('Has both tokens', () => { pm.expect(body.accessToken).to.be.a('string'); pm.expect(body.refreshToken).to.be.a('string'); });",
+            "pm.test('Access token lives 15 minutes', () => pm.expect(body.expiresInSeconds).to.eql(900));",
+            "pm.collectionVariables.set('aliceAccess', body.accessToken);",
+            "pm.collectionVariables.set('aliceRefresh', body.refreshToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"alice-pass-123\"\n}" }
+          }
+        },
+        {
+          "name": "1.4 Login Bob",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('bobAccess', pm.response.json().accessToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{bobEmail}}\",\n  \"password\": \"bob-pass-1234\"\n}" }
+          }
+        },
+        {
+          "name": "1.5 Wrong password -> 401",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));",
+            "pm.test('Generic message (no hint which part was wrong)', () => pm.expect(pm.response.json().message).to.eql('Invalid email or password'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"not-her-password\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Token checks",
+      "item": [
+        {
+          "name": "2.1 No token -> 401",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ]}}],
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/wallets" }
+        },
+        {
+          "name": "2.2 Tampered token -> 401",
+          "event": [
+            { "listen": "prerequest", "script": { "exec": [
+              "// Flip one character of the signature: the token no longer verifies.",
+              "const t = pm.collectionVariables.get('aliceAccess');",
+              "const last = t.slice(-1) === 'A' ? 'B' : 'A';",
+              "pm.collectionVariables.set('tamperedToken', t.slice(0, -1) + last);"
+            ]}},
+            { "listen": "test", "script": { "exec": [
+              "pm.test('401', () => pm.response.to.have.status(401));",
+              "pm.test('Says the token is invalid', () => pm.expect(pm.response.json().message).to.eql('Invalid access token'));"
+            ]}}
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{tamperedToken}}" }],
+            "url": "{{baseUrl}}/api/wallets"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Wallets and ownership (IDOR)",
+      "item": [
+        {
+          "name": "3.1 Alice creates a wallet",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('aliceWalletId', pm.response.json().id);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets",
+            "body": { "mode": "raw", "raw": "{\n  \"currency\": \"INR\"\n}" }
+          }
+        },
+        {
+          "name": "3.2 Bob creates a wallet",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.collectionVariables.set('bobWalletId', pm.response.json().id);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{bobAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets",
+            "body": { "mode": "raw", "raw": "{\n  \"currency\": \"INR\"\n}" }
+          }
+        },
+        {
+          "name": "3.3 Alice deposits 1000",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Balance is 1000', () => pm.expect(Number(pm.response.json().balance)).to.eql(1000));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}/deposit",
+            "body": { "mode": "raw", "raw": "{\n  \"amount\": 1000\n}" }
+          }
+        },
+        {
+          "name": "3.4 Alice lists her wallets (only hers)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.test('Exactly one wallet, hers', () => { const w = pm.response.json(); pm.expect(w.length).to.eql(1); pm.expect(w[0].id).to.eql(pm.collectionVariables.get('aliceWalletId')); });"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{aliceAccess}}" }],
+            "url": "{{baseUrl}}/api/wallets"
+          }
+        },
+        {
+          "name": "3.5 Bob reads Alice's wallet -> 404",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404, as if it did not exist', () => pm.response.to.have.status(404));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bobAccess}}" }],
+            "url": "{{baseUrl}}/api/wallets/{{aliceWalletId}}"
+          }
+        },
+        {
+          "name": "3.6 Bob moves money out of Alice's wallet -> 404",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('404', () => pm.response.to.have.status(404));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{bobAccess}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 500\n}" }
+          }
+        },
+        {
+          "name": "3.7 Alice sends Bob 100",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('201 Created', () => pm.response.to.have.status(201));",
+            "pm.test('SUCCESS', () => pm.expect(pm.response.json().status).to.eql('SUCCESS'));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{aliceAccess}}" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "url": "{{baseUrl}}/api/transfers",
+            "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": {{aliceWalletId}},\n  \"toWalletId\": {{bobWalletId}},\n  \"amount\": 100\n}" }
+          }
+        },
+        {
+          "name": "3.8 Bob sees 100 in his wallet",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('Balance is 100', () => pm.expect(Number(pm.response.json().balance)).to.eql(100));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bobAccess}}" }],
+            "url": "{{baseUrl}}/api/wallets/{{bobWalletId}}"
+          }
+        },
+        {
+          "name": "3.9 Bob calls the admin endpoint -> 403",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('403', () => pm.response.to.have.status(403));"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{bobAccess}}" }],
+            "url": "{{baseUrl}}/api/admin/transactions"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Refresh rotation and logout",
+      "item": [
+        {
+          "name": "4.1 Refresh -> new pair, old one used up",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const body = pm.response.json();",
+            "pm.test('New refresh token differs', () => pm.expect(body.refreshToken).to.not.eql(pm.collectionVariables.get('aliceRefresh')));",
+            "pm.collectionVariables.set('aliceOldRefresh', pm.collectionVariables.get('aliceRefresh'));",
+            "pm.collectionVariables.set('aliceRefresh', body.refreshToken);",
+            "pm.collectionVariables.set('aliceAccess', body.accessToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{aliceRefresh}}\"\n}" }
+          }
+        },
+        {
+          "name": "4.2 Reuse the OLD refresh token -> 401 (theft detected)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{aliceOldRefresh}}\"\n}" }
+          }
+        },
+        {
+          "name": "4.3 Even the NEW refresh token is now revoked -> 401",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401: reuse revoked every session of Alice', () => pm.response.to.have.status(401));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{aliceRefresh}}\"\n}" }
+          }
+        },
+        {
+          "name": "4.4 Alice logs in again",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('aliceRefresh', pm.response.json().refreshToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{aliceEmail}}\",\n  \"password\": \"alice-pass-123\"\n}" }
+          }
+        },
+        {
+          "name": "4.5 Logout -> 204",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('204 No Content', () => pm.response.to.have.status(204));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/logout",
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{aliceRefresh}}\"\n}" }
+          }
+        },
+        {
+          "name": "4.6 Refresh after logout -> 401",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('401', () => pm.response.to.have.status(401));"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/refresh",
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{aliceRefresh}}\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Admin (set adminEmail / adminPassword first)",
+      "item": [
+        {
+          "name": "5.1 Login as admin",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('adminAccess', pm.response.json().accessToken);"
+          ]}}],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}" }
+          }
+        },
+        {
+          "name": "5.2 Admin lists all transactions (paged)",
+          "event": [{ "listen": "test", "script": { "exec": [
+            "pm.test('200 OK', () => pm.response.to.have.status(200));",
+            "const body = pm.response.json();",
+            "pm.test('Paged shape', () => { pm.expect(body.content).to.be.an('array'); pm.expect(body.size).to.eql(5); pm.expect(body.totalElements).to.be.above(0); });"
+          ]}}],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{adminAccess}}" }],
+            "url": "{{baseUrl}}/api/admin/transactions?page=0&size=5"
+          }
+        }
+      ]
+    }
+  ]
+}

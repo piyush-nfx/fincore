@@ -4,6 +4,7 @@ import com.piyush.fincore.dto.TransactionResponse;
 import com.piyush.fincore.dto.TransferRequest;
 import com.piyush.fincore.entity.Transaction;
 import com.piyush.fincore.entity.Wallet;
+import com.piyush.fincore.exception.IdempotencyKeyConflictException;
 import com.piyush.fincore.exception.InsufficientBalanceException;
 import com.piyush.fincore.exception.InvalidOperationException;
 import com.piyush.fincore.exception.WalletNotFoundException;
@@ -31,13 +32,19 @@ public class TransferService {
      * <p>Concurrency: both wallets carry @Version. If another transfer updates one of them between our read and
      * our commit, the version check fails and the commit throws ObjectOptimisticLockingFailureException instead
      * of double-spending. Phase 3 adds automatic retries for that case.
+     *
+     * @param userId the logged-in user; they must own the source wallet (the destination can be anyone's)
      */
     @Transactional
-    public TransactionResponse transfer(TransferRequest request, String idempotencyKey) {
+    public TransactionResponse transfer(Long userId, TransferRequest request, String idempotencyKey) {
         // A retried request with a key we've already processed returns the original result: no second transfer.
         if (idempotencyKey != null) {
             Optional<Transaction> existing = transactionRepository.findByIdempotencyKey(idempotencyKey);
             if (existing.isPresent()) {
+                // Never hand back another user's transaction just because they guessed or reused a key.
+                if (!existing.get().getFromWallet().getUser().getId().equals(userId)) {
+                    throw new IdempotencyKeyConflictException();
+                }
                 return TransactionResponse.from(existing.get());
             }
         }
@@ -45,8 +52,11 @@ public class TransferService {
         if (request.fromWalletId().equals(request.toWalletId())) {
             throw new InvalidOperationException("Cannot transfer to the same wallet");
         }
-        Wallet from = findWallet(request.fromWalletId());
-        Wallet to = findWallet(request.toWalletId());
+        // Ownership check: you can only send money FROM your own wallet. Someone else's gives 404, as if it didn't exist.
+        Wallet from = walletRepository.findByIdAndUserId(request.fromWalletId(), userId)
+                .orElseThrow(() -> new WalletNotFoundException(request.fromWalletId()));
+        Wallet to = walletRepository.findById(request.toWalletId())
+                .orElseThrow(() -> new WalletNotFoundException(request.toWalletId()));
         if (!from.getCurrency().equals(to.getCurrency())) {
             throw new InvalidOperationException("Currency mismatch: " + from.getCurrency() + " -> " + to.getCurrency());
         }
@@ -61,9 +71,5 @@ public class TransferService {
 
         Transaction tx = transactionRepository.save(Transaction.transfer(from, to, request.amount(), idempotencyKey));
         return TransactionResponse.from(tx);
-    }
-
-    private Wallet findWallet(Long walletId) {
-        return walletRepository.findById(walletId).orElseThrow(() -> new WalletNotFoundException(walletId));
     }
 }

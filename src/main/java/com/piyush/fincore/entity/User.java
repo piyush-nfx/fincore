@@ -7,6 +7,7 @@ import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
 import java.time.Instant;
+import java.util.Locale;
 
 @Entity
 @Table(name = "users")
@@ -41,5 +42,10 @@ public class User {
         this.email = email;
         this.passwordHash = passwordHash;
         this.role = role;
+    }
+
+    /** One canonical form, so "Alice@X.com " and "alice@x.com" are the same account at register and login. */
+    public static String normalizeEmail(String email) {
+        return email.trim().toLowerCase(Locale.ROOT);
     }
 }

@@ -3,6 +3,7 @@ package com.piyush.fincore.service;
 import com.piyush.fincore.dto.TransactionResponse;
 import com.piyush.fincore.dto.TransferRequest;
 import com.piyush.fincore.entity.*;
+import com.piyush.fincore.exception.IdempotencyKeyConflictException;
 import com.piyush.fincore.exception.InsufficientBalanceException;
 import com.piyush.fincore.exception.InvalidOperationException;
 import com.piyush.fincore.exception.WalletNotFoundException;
@@ -29,6 +30,9 @@ import static org.mockito.Mockito.*;
 @ExtendWith(MockitoExtension.class)
 class TransferServiceTest {
 
+    private static final Long ALICE = 10L;
+    private static final Long BOB = 20L;
+
     @Mock
     private WalletRepository walletRepository;
     @Mock
@@ -39,24 +43,24 @@ class TransferServiceTest {
     @InjectMocks
     private TransferService transferService;
 
-    private Wallet alice;
-    private Wallet bob;
+    private Wallet aliceWallet;
+    private Wallet bobWallet;
 
     @BeforeEach
     void setUp() {
-        alice = wallet(1L, "INR", "100");
-        bob = wallet(2L, "INR", "0");
+        aliceWallet = wallet(1L, ALICE, "INR", "100");
+        bobWallet = wallet(2L, BOB, "INR", "0");
     }
 
     @Test
     void successfulTransferMovesMoneyAndWritesLedgerRow() {
-        stubWallets(alice, bob);
+        stubWallets(aliceWallet, bobWallet);
         when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        TransactionResponse result = transferService.transfer(new TransferRequest(1L, 2L, new BigDecimal("30")), "key-1");
+        TransactionResponse result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30")), "key-1");
 
-        assertThat(alice.getBalance()).isEqualByComparingTo("70");
-        assertThat(bob.getBalance()).isEqualByComparingTo("30");
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("70");
+        assertThat(bobWallet.getBalance()).isEqualByComparingTo("30");
         assertThat(result.status()).isEqualTo(TransactionStatus.SUCCESS);
         assertThat(result.type()).isEqualTo(TransactionType.TRANSFER);
         assertThat(result.idempotencyKey()).isEqualTo("key-1");
@@ -64,68 +68,93 @@ class TransferServiceTest {
     }
 
     @Test
-    void insufficientBalanceRecordsFailedRowAndChangesNothing() {
-        stubWallets(alice, bob);
+    void cannotTransferFromSomeoneElsesWallet() {
+        // Bob asks to send money out of Alice's wallet: the owner-scoped lookup finds nothing.
+        when(walletRepository.findByIdAndUserId(1L, BOB)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> transferService.transfer(new TransferRequest(1L, 2L, new BigDecimal("100.01")), "key-2"))
+        assertThatThrownBy(() -> transferService.transfer(BOB, new TransferRequest(1L, 2L, BigDecimal.TEN), null))
+                .isInstanceOf(WalletNotFoundException.class);
+
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
+        verify(transactionRepository, never()).save(any());
+    }
+
+    @Test
+    void insufficientBalanceRecordsFailedRowAndChangesNothing() {
+        stubWallets(aliceWallet, bobWallet);
+
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("100.01")), "key-2"))
                 .isInstanceOf(InsufficientBalanceException.class);
 
-        assertThat(alice.getBalance()).isEqualByComparingTo("100");
-        assertThat(bob.getBalance()).isEqualByComparingTo("0");
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
+        assertThat(bobWallet.getBalance()).isEqualByComparingTo("0");
         verify(failedTransferRecorder).record(eq(1L), eq(2L), eq(new BigDecimal("100.01")), eq("key-2"), anyString());
         verify(transactionRepository, never()).save(any());
     }
 
     @Test
     void sameWalletTransferIsRejectedBeforeTouchingTheDatabase() {
-        assertThatThrownBy(() -> transferService.transfer(new TransferRequest(1L, 1L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 1L, BigDecimal.TEN), null))
                 .isInstanceOf(InvalidOperationException.class);
 
         verifyNoInteractions(walletRepository);
     }
 
     @Test
-    void unknownWalletIsRejected() {
-        when(walletRepository.findById(1L)).thenReturn(Optional.of(alice));
+    void unknownDestinationWalletIsRejected() {
+        when(walletRepository.findByIdAndUserId(1L, ALICE)).thenReturn(Optional.of(aliceWallet));
         when(walletRepository.findById(99L)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> transferService.transfer(new TransferRequest(1L, 99L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 99L, BigDecimal.TEN), null))
                 .isInstanceOf(WalletNotFoundException.class);
-        assertThat(alice.getBalance()).isEqualByComparingTo("100");
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
     }
 
     @Test
     void currencyMismatchIsRejected() {
-        Wallet usd = wallet(3L, "USD", "0");
-        stubWallets(alice, usd);
+        Wallet usd = wallet(3L, BOB, "USD", "0");
+        stubWallets(aliceWallet, usd);
 
-        assertThatThrownBy(() -> transferService.transfer(new TransferRequest(1L, 3L, BigDecimal.TEN), null))
+        assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 3L, BigDecimal.TEN), null))
                 .isInstanceOf(InvalidOperationException.class)
                 .hasMessageContaining("Currency mismatch");
-        assertThat(alice.getBalance()).isEqualByComparingTo("100");
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
     }
 
     @Test
     void repeatedIdempotencyKeyReturnsOriginalWithoutMovingMoneyAgain() {
-        Transaction original = Transaction.transfer(alice, bob, new BigDecimal("30"), "key-3");
+        Transaction original = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-3");
         when(transactionRepository.findByIdempotencyKey("key-3")).thenReturn(Optional.of(original));
 
-        TransactionResponse result = transferService.transfer(new TransferRequest(1L, 2L, new BigDecimal("30")), "key-3");
+        TransactionResponse result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30")), "key-3");
 
         assertThat(result.idempotencyKey()).isEqualTo("key-3");
-        assertThat(alice.getBalance()).isEqualByComparingTo("100");
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("100");
         verifyNoInteractions(walletRepository);
         verify(transactionRepository, never()).save(any());
     }
 
+    @Test
+    void idempotencyKeyOfAnotherUserIsRejectedInsteadOfLeakingTheirTransaction() {
+        Transaction alicesTransfer = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-4");
+        when(transactionRepository.findByIdempotencyKey("key-4")).thenReturn(Optional.of(alicesTransfer));
+
+        assertThatThrownBy(() -> transferService.transfer(BOB, new TransferRequest(2L, 1L, BigDecimal.ONE), "key-4"))
+                .isInstanceOf(IdempotencyKeyConflictException.class);
+        verifyNoInteractions(walletRepository);
+    }
+
     private void stubWallets(Wallet from, Wallet to) {
-        when(walletRepository.findById(from.getId())).thenReturn(Optional.of(from));
+        when(walletRepository.findByIdAndUserId(from.getId(), from.getUser().getId())).thenReturn(Optional.of(from));
         when(walletRepository.findById(to.getId())).thenReturn(Optional.of(to));
     }
 
-    private static Wallet wallet(Long id, String currency, String balance) {
-        Wallet wallet = new Wallet(new User("u" + id, "u" + id + "@example.com", "hash", Role.USER), currency);
-        ReflectionTestUtils.setField(wallet, "id", id); // ids are normally assigned by the database
+    // Ids are normally assigned by the database, so the tests set them by reflection.
+    private static Wallet wallet(Long id, Long ownerId, String currency, String balance) {
+        User owner = new User("u" + ownerId, "u" + ownerId + "@example.com", "hash", Role.USER);
+        ReflectionTestUtils.setField(owner, "id", ownerId);
+        Wallet wallet = new Wallet(owner, currency);
+        ReflectionTestUtils.setField(wallet, "id", id);
         BigDecimal initial = new BigDecimal(balance);
         if (initial.signum() > 0) {
             wallet.credit(initial);
