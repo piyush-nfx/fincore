@@ -108,10 +108,12 @@
           "name": "2.2 Tampered token -> 401",
           "event": [
             { "listen": "prerequest", "script": { "exec": [
-              "// Flip one character of the signature: the token no longer verifies.",
+              "// Change one character in the MIDDLE of the signature: the token no longer verifies.",
+              "// (Not the last character: it also holds unused Base64 padding bits, so changing it can leave the signature bytes identical.)",
               "const t = pm.collectionVariables.get('aliceAccess');",
-              "const last = t.slice(-1) === 'A' ? 'B' : 'A';",
-              "pm.collectionVariables.set('tamperedToken', t.slice(0, -1) + last);"
+              "const p = t.lastIndexOf('.') + 20;",
+              "const swapped = t[p] === 'A' ? 'B' : 'A';",
+              "pm.collectionVariables.set('tamperedToken', t.slice(0, p) + swapped + t.slice(p + 1));"
             ]}},
             { "listen": "test", "script": { "exec": [
               "pm.test('401', () => pm.response.to.have.status(401));",

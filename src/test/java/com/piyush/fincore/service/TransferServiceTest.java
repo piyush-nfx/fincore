@@ -126,7 +126,7 @@ class TransferServiceTest {
     @Test
     void repeatedIdempotencyKeyReturnsOriginalWithoutMovingMoneyAgain() {
         Transaction original = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-3");
-        when(transactionRepository.findByIdempotencyKey("key-3")).thenReturn(Optional.of(original));
+        when(transactionRepository.findByInitiatorIdAndIdempotencyKey(ALICE, "key-3")).thenReturn(Optional.of(original));
 
         TransferResult result = transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("30.00")), "key-3");
 
@@ -141,7 +141,7 @@ class TransferServiceTest {
     void replayOfAFailedTransferGivesTheSameErrorAgain() {
         Transaction failed = Transaction.failedTransfer(aliceWallet, bobWallet, new BigDecimal("500"), "key-f",
                 "Insufficient balance in wallet 1");
-        when(transactionRepository.findByIdempotencyKey("key-f")).thenReturn(Optional.of(failed));
+        when(transactionRepository.findByInitiatorIdAndIdempotencyKey(ALICE, "key-f")).thenReturn(Optional.of(failed));
 
         assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("500")), "key-f"))
                 .isInstanceOf(TransferFailedException.class)
@@ -152,7 +152,7 @@ class TransferServiceTest {
     @Test
     void sameKeyWithADifferentAmountIsRejected() {
         Transaction original = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-d");
-        when(transactionRepository.findByIdempotencyKey("key-d")).thenReturn(Optional.of(original));
+        when(transactionRepository.findByInitiatorIdAndIdempotencyKey(ALICE, "key-d")).thenReturn(Optional.of(original));
 
         assertThatThrownBy(() -> transferService.transfer(ALICE, new TransferRequest(1L, 2L, new BigDecimal("31")), "key-d"))
                 .isInstanceOf(IdempotencyKeyConflictException.class)
@@ -161,13 +161,28 @@ class TransferServiceTest {
     }
 
     @Test
-    void idempotencyKeyOfAnotherUserIsRejectedInsteadOfLeakingTheirTransaction() {
-        Transaction alicesTransfer = Transaction.transfer(aliceWallet, bobWallet, new BigDecimal("30"), "key-4");
-        when(transactionRepository.findByIdempotencyKey("key-4")).thenReturn(Optional.of(alicesTransfer));
+    void keysAreScopedPerUserSoTheSameKeyFromAnotherUserIsANewTransfer() {
+        // Alice already used "key-4", but keys are looked up per user: for Bob it is unused, so his transfer runs
+        // normally and Alice's transaction is never even read.
+        stubWallets(bobWallet, aliceWallet);
+        bobWallet.credit(BigDecimal.TEN);
+        when(transactionRepository.save(any(Transaction.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        assertThatThrownBy(() -> transferService.transfer(BOB, new TransferRequest(2L, 1L, BigDecimal.ONE), "key-4"))
-                .isInstanceOf(IdempotencyKeyConflictException.class);
-        verifyNoInteractions(walletRepository);
+        TransferResult result = transferService.transfer(BOB, new TransferRequest(2L, 1L, BigDecimal.ONE), "key-4");
+
+        assertThat(result.replayed()).isFalse();
+        assertThat(aliceWallet.getBalance()).isEqualByComparingTo("101");
+        verify(transactionRepository).findByInitiatorIdAndIdempotencyKey(BOB, "key-4");
+        verify(transactionRepository, never()).findByInitiatorIdAndIdempotencyKey(eq(ALICE), anyString());
+    }
+
+    @Test
+    void ledgerRowRecordsWhoInitiatedIt() {
+        Transaction transfer = Transaction.transfer(aliceWallet, bobWallet, BigDecimal.ONE, "k");
+        Transaction deposit = Transaction.deposit(bobWallet, BigDecimal.ONE);
+
+        assertThat(transfer.getInitiator().getId()).isEqualTo(ALICE); // the sender
+        assertThat(deposit.getInitiator().getId()).isEqualTo(BOB);    // the wallet owner
     }
 
     private void stubWallets(Wallet from, Wallet to) {

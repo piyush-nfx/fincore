@@ -89,15 +89,12 @@ public class TransferService {
      * SUCCESS -> the same transaction again; FAILED -> the same 422 error again.
      */
     private Optional<TransferResult> replay(Long userId, TransferRequest request, String idempotencyKey) {
-        Optional<Transaction> found = transactionRepository.findByIdempotencyKey(idempotencyKey);
+        // Looked up per user: another user's transaction can never come back, even if they used the same key.
+        Optional<Transaction> found = transactionRepository.findByInitiatorIdAndIdempotencyKey(userId, idempotencyKey);
         if (found.isEmpty()) {
             return Optional.empty();
         }
         Transaction existing = found.get();
-        // Never hand back another user's transaction just because they guessed or reused a key.
-        if (!existing.getFromWallet().getUser().getId().equals(userId)) {
-            throw new IdempotencyKeyConflictException();
-        }
         // Same key but a different request is a client bug; silently returning the old transfer would hide it.
         if (!isSameRequest(existing, request)) {
             throw new IdempotencyKeyConflictException(

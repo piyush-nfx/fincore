@@ -1,0 +1,39 @@
+# Runs FinCore and its own MySQL with one command:   docker compose up --build
+# Values like ${DB_PASSWORD} come from the .env file next to this one (Docker Compose reads it automatically).
+# This MySQL is separate from any MySQL installed on your machine; its data lives in the "fincore-mysql" volume.
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: fincore
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    volumes:
+      - fincore-mysql:/var/lib/mysql
+    # The app must not start before MySQL accepts connections, so compose waits for this check to pass.
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # No published port: only the app container talks to this database (and it won't clash with a local MySQL on 3306).
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # "mysql" is the service name above: containers on the same compose network reach each other by name.
+      DB_URL: jdbc:mysql://mysql:3306/fincore
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    ports:
+      - "8083:8083"
+    restart: unless-stopped
+
+volumes:
+  fincore-mysql:

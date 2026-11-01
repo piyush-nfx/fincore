@@ -11,7 +11,8 @@ import java.util.Optional;
 
 public interface TransactionRepository extends JpaRepository<Transaction, Long> {
 
-    Optional<Transaction> findByIdempotencyKey(String idempotencyKey);
+    // Keys are unique per user, so a key is always looked up together with the user who sent it.
+    Optional<Transaction> findByInitiatorIdAndIdempotencyKey(Long initiatorId, String idempotencyKey);
 
     /**
      * The user's ledger: everything they sent (including their own FAILED attempts) plus everything that actually
